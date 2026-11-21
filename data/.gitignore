@@ -1,0 +1,12 @@
+# Ignore rollout datasets and caches
+*.jsonl
+*.json
+*.csv
+*.parquet
+*.pkl
+*.pt
+*.bin
+
+# Keep .gitkeep and the trained value model
+!.gitkeep
+!value_model.joblib

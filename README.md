@@ -171,8 +171,9 @@ python -m experiments.run_search --method beam --policy mock ...  # no LLM, for 
 python -m experiments.summarize "results/**/*.jsonl"             # EM, mean C(q), bootstrap CIs
 
 bash experiments/smoke.sh                     # every method on a few questions
-bash experiments/tune.sh                      # delta grid on validation[300:450]
-DP=0.1 DA=0.15 bash experiments/test_sweep.sh # final runs on validation[:300], 3 seeds
+bash experiments/tune.sh                      # delta grid, gated width-1 beam, validation[300:450] (disjoint from test)
+DP=0.1 DA=0.15 bash experiments/test_sweep.sh # gated beam/MCTS/PHS x 3 seeds + LATS, all on validation[:300]
+SEEDS="1 2" RUN_LATS=0 DP=.. DA=.. bash experiments/test_sweep.sh   # e.g. split seeds across machines
 ```
 
 Runs append to JSONL and resume where they stopped. Each row holds `is_correct`, `C_q`, `pruned_tokens`, `n_llm_calls`, `stop_reason`, the chosen trajectory and a per-node `value_log` (every expanded prefix with its V), which can be used for step-wise analysis or to refit V_theta on search-time prefixes.

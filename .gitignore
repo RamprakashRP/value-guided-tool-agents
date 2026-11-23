@@ -53,5 +53,9 @@ data/*.pkl
 data/*.pt
 data/*.bin
 
+# Search outputs (share summary CSVs, not raw trees)
+results/**/*.jsonl
+results/**/*.log
+
 # Explicitly allow the trained value model
 !data/value_model.joblib

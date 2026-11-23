@@ -13,14 +13,18 @@ value-guided-tool-agents/
 │   └── interfaces.py     # score_prefix(trajectory) -> float signature
 ├── envs/
 │   ├── hotpot_mcp.py     # [Track A] MCP 2.x stdio server for HotpotQA
+│   ├── hotpot_env.py     # [Track B] Same tools in-process, with snapshot/restore for branching
 │   └── test_hotpot_mcp.py# End-to-end smoke test for MCP server
 ├── agent/
 │   ├── rollout_runner.py # [Track A] Greedy Qwen-2.5-7B & GPT-4o rollout runner
 │   └── search/           # [Track B] Informed search algorithms (Parthiv)
+│       ├── common.py     # Search tree, Eq. 1 TokenLedger, policies, scorers, prune/backtrack
 │       ├── beam.py       # Beam search guided by V_theta
-│       ├── mcts.py       # Monte Carlo Tree Search with V_theta priors
-│       ├── phs.py        # Policy-guided Heuristic Search
-│       └── lats.py       # Language Agent Tree Search with reflection
+│       ├── mcts.py       # Monte Carlo Tree Search with V_theta leaf values
+│       ├── phs.py        # Policy-guided Heuristic Search, phi(n) = g / (pi * V)
+│       └── lats.py       # LATS baseline: LLM self-evaluation + reflection
+├── experiments/          # [Track B] run_search.py, summarize.py, smoke/tune/test_sweep scripts
+├── tests/                # pytest: env parity with MCP server, search + ledger tests (mock LLM)
 ├── value_model/
 │   ├── features.py       # [Track A] Feature extractor phi(tau_{1:t})
 │   └── train_value.py    # [Track A] Value model training, calibration & ECE
@@ -139,6 +143,38 @@ async def search_step():
 
 asyncio.run(search_step())
 ```
+
+---
+
+## 🌲 Track B: Value-Guided Search
+
+All search methods share one ReAct expansion step (`SearchContext.expand` in `agent/search/common.py`): sample K actions from Qwen, execute each on a forked `HotpotEnv`, and score the child prefix with a scorer (`vtheta`, or the dummy `random` / `heuristic`).
+
+- **Eq. 1 accounting:** `TokenLedger` records prompt + completion tokens of *every* LLM call made for a query, including samples whose branch is later pruned, and LATS self-evaluation / reflection calls. `C_q` in the results is this total; `pruned_tokens` is the part spent on pruned branches.
+- **Per-path tokens:** `info["total_tokens"]` on each step is the cumulative count along that branch only, matching how V_theta's training rollouts were logged.
+- **Prompt parity:** system prompt and tool schemas are identical to `rollout_runner.py` (enforced by `tests/test_env_parity.py`). `--method greedy` reproduces `rollout_runner` exactly (same actions and per-step tokens).
+- **Proposal sampling (`--sampling`):** Qwen puts ~96% probability on its top tool call, so K i.i.d. samples are usually identical. `diverse` (default) makes sample 1 greedy (the greedy path is always in the tree) and asks samples 2..K for an action different from those already proposed; the note is added to the request only, never to the stored history. `iid` keeps K independent samples for ablation. All calls are charged.
+- **Controls:** children with `V < delta_prune` are dropped; if no child reaches `delta_abort`, search backtracks to the best unexpanded node with `V >= delta_abort`, otherwise aborts (Y = 0). `--max-query-tokens` (default 3 x B_token) is a hard per-query cap.
+- **Forced finish:** if the cap is hit before any `finish`, one extra greedy call asks the best open branch to answer now (charged as `force_finish`; the row has `forced_finish: true`). `--no-force-finish` restores strict abort.
+- **Answer selection:** the finished trajectory with the highest V; the ground truth is only used after search to score it.
+
+```bash
+# Ollama with a 4k context (one-time: brew install ollama && ollama pull qwen2.5:7b)
+OLLAMA_CONTEXT_LENGTH=4096 ollama serve
+
+pytest                                        # offline tests (mock LLM)
+python -m experiments.run_search --method beam --scorer vtheta --K 3 \
+    --delta-prune 0.1 --delta-abort 0.15 --split "validation[:20]"
+python -m experiments.run_search --method mcts --K 3 --N 3 ...   # also: phs, lats, greedy
+python -m experiments.run_search --method beam --policy mock ...  # no LLM, for debugging
+python -m experiments.summarize "results/**/*.jsonl"             # EM, mean C(q), bootstrap CIs
+
+bash experiments/smoke.sh                     # every method on a few questions
+bash experiments/tune.sh                      # delta grid on validation[300:450]
+DP=0.1 DA=0.15 bash experiments/test_sweep.sh # final runs on validation[:300], 3 seeds
+```
+
+Runs append to JSONL and resume where they stopped. Each row holds `is_correct`, `C_q`, `pruned_tokens`, `n_llm_calls`, `stop_reason`, the chosen trajectory and a per-node `value_log` (every expanded prefix with its V), which can be used for step-wise analysis or to refit V_theta on search-time prefixes.
 
 ---
 

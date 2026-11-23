@@ -6,7 +6,7 @@ from agent.search.common import SearchContext, SearchResult
 
 
 def beam_search(ctx: SearchContext) -> SearchResult:
-    """Beam of width K; each beam node samples K actions.
+    """Beam of width beam_width (default K); each beam node samples K actions.
 
     Children with V < delta_prune are dropped. If no surviving child reaches
     delta_abort, jump to the best unexpanded node anywhere in the tree with
@@ -44,6 +44,6 @@ def beam_search(ctx: SearchContext) -> SearchResult:
             beam = [target]
             continue
 
-        beam = alive[: cfg.k]
+        beam = alive[: cfg.beam_width or cfg.k]
 
     return ctx.result(None, "finished")

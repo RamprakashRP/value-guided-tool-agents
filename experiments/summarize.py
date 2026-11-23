@@ -34,10 +34,15 @@ def bootstrap_ci(values: np.ndarray, n_boot: int = 2000, seed: int = 0) -> Tuple
 def group_key(rec: Dict[str, Any]) -> Tuple:
     c = rec["config"]
     if rec["method"] == "greedy":
-        return (rec["method"], rec.get("model"), rec["scorer"], "-", 1, "-", "-", "-")
+        return (rec["method"], rec.get("model"), rec["scorer"], "-", 1, "-", "-", "-", "-", "-")
     n = c["n_sims"] if rec["method"] in ("mcts", "lats") else "-"
     sampling = c.get("sampling", "iid")
-    return (rec["method"], rec.get("model"), rec["scorer"], sampling, c["k"], n, c["delta_prune"], c["delta_abort"])
+    width = (c.get("beam_width") or c["k"]) if rec["method"] == "beam" else "-"
+    gate = c.get("gate", "none")
+    if gate != "none":
+        gate = f"{gate}(v{c['gate_value']},e{c['gate_entropy']})"
+    return (rec["method"], rec.get("model"), rec["scorer"], sampling, c["k"], n, width, gate,
+            c["delta_prune"], c["delta_abort"])
 
 
 def load_search_rows(patterns: List[str]) -> Dict[Tuple, List[Dict[str, Any]]]:
@@ -95,6 +100,11 @@ def summarize_rows(rows: List[Dict[str, Any]], b_token: int) -> Dict[str, Any]:
         "pruned_frac": float(pruned.sum() / max(all_cost.sum(), 1)),
         "abort_rate": float(np.mean([r["aborted"] for r in rows])),
         "forced_rate": float(np.mean([r.get("forced_finish", False) for r in rows])),
+        "branch_rate": (
+            sum(r.get("n_branched", 0) for r in rows) / max(sum(r.get("n_expansions", 0) for r in rows), 1)
+            if any("n_expansions" in r for r in rows) else float("nan")
+        ),
+        "mean_depth": float(np.mean([r.get("depth", 0) for r in rows])),
         "mean_calls": float(np.mean([r["n_llm_calls"] for r in rows])),
     }
 
@@ -110,14 +120,14 @@ def main() -> None:
     table = []
     for spec in args.baseline:
         name, path = spec.split("=", 1)
-        table.append(((name, "-", "-", "-", 1, "-", "-", "-"), summarize_rows(load_baseline(name, path), args.b_token)))
+        table.append(((name, "-", "-", "-", 1, "-", "-", "-", "-", "-"), summarize_rows(load_baseline(name, path), args.b_token)))
     for key, rows in sorted(load_search_rows(args.patterns).items(), key=lambda kv: str(kv[0])):
         table.append((key, summarize_rows(rows, args.b_token)))
 
     header = [
-        "method", "model", "scorer", "sampling", "K", "N", "d_prune", "d_abort", "n_q", "seeds",
+        "method", "model", "scorer", "sampling", "K", "N", "W", "gate", "d_prune", "d_abort", "n_q", "seeds",
         "EM", "EM 95% CI", "mean C(q)", "C(q) 95% CI", "mean<=B", "q<=B", "pruned tok", "abort", "forced",
-        "calls/q",
+        "branch", "depth", "calls/q",
     ]
     print(f"B_token = {args.b_token}\n")
     print("| " + " | ".join(header) + " |")
@@ -136,6 +146,8 @@ def main() -> None:
             f"{100 * s['pruned_frac']:.0f}%",
             f"{100 * s['abort_rate']:.0f}%",
             f"{100 * s['forced_rate']:.0f}%",
+            "-" if s["branch_rate"] != s["branch_rate"] else f"{100 * s['branch_rate']:.0f}%",
+            f"{s['mean_depth']:.1f}",
             f"{s['mean_calls']:.1f}",
         ]
         print("| " + " | ".join(cells) + " |")

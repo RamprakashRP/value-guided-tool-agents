@@ -147,6 +147,78 @@ def test_iid_sampling_has_no_note():
     assert all(m[-1]["content"].startswith("Question:") for m, _ in policy.requests)
 
 
+class EntropyPolicy(RecordingPolicy):
+    """RecordingPolicy whose greedy samples carry a fixed token entropy."""
+
+    def __init__(self, *args, entropy=0.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.entropy = entropy
+
+    def sample(self, messages, temperature, seed):
+        cand = super().sample(messages, temperature, seed)
+        cand.token_entropy = self.entropy
+        return cand
+
+
+def _calls_for_child_expansion(gate, value, entropy, k=3):
+    policy = EntropyPolicy(TITLES, seed=0, finish_rate=-1.0, entropy=entropy)
+    ctx = make_ctx(policy, ConstantScorer(value), k=k, gate=gate, gate_value=0.33, gate_entropy=0.08)
+    root_children = ctx.expand(ctx.root())
+    root_calls = ctx.ledger.n_calls
+    ctx.expand(root_children[0])
+    return root_calls, ctx.ledger.n_calls - root_calls, ctx
+
+
+@pytest.mark.parametrize("gate,value,entropy,expected", [
+    ("either", 0.9, 0.0, 1),
+    ("either", 0.1, 0.0, 3),
+    ("either", 0.9, 0.5, 3),
+    ("value", 0.9, 0.5, 1),
+    ("value", 0.1, 0.0, 3),
+    ("entropy", 0.1, 0.0, 1),
+    ("entropy", 0.9, 0.5, 3),
+    ("none", 0.9, 0.0, 3),
+])
+def test_gate_controls_branching(gate, value, entropy, expected):
+    root_calls, child_calls, ctx = _calls_for_child_expansion(gate, value, entropy)
+    assert root_calls == 3
+    assert child_calls == expected
+    assert ctx.n_expansions == 2
+    assert ctx.n_branched == 1 + (expected > 1)
+    assert ctx.ledger.total == sum(ctx.policy.reported)
+    logged = [e for e in ctx.value_log if e["parent_id"] != 0]
+    assert all(e["branched"] == (expected > 1) for e in logged)
+
+
+@pytest.mark.parametrize("method", list(METHODS))
+@pytest.mark.parametrize("seed", range(3))
+def test_gated_search_ledger_and_cost(method, seed):
+    costs = {}
+    for gate in ("none", "either"):
+        policy = RecordingPolicy(TITLES, answers=TITLES + ["yes"], seed=seed)
+        ctx = make_ctx(policy, VthetaScorer(), gate=gate, seed=seed, max_query_tokens=6000)
+        result = METHODS[method](ctx)
+        assert result.ledger.total == sum(policy.reported)
+        assert result.n_branched <= result.n_expansions
+        costs[gate] = result
+    assert costs["either"].n_branched <= costs["either"].n_expansions
+
+
+@pytest.mark.parametrize("width", [1, 2])
+def test_beam_width_limits_expansions_per_level(width):
+    policy = RecordingPolicy(TITLES, seed=1, finish_rate=-1.0)
+    ctx = make_ctx(policy, RandomScorer(0), k=3, beam_width=width, max_query_tokens=4000)
+    beam_search(ctx)
+    expanded_by_depth = {}
+    for n in ctx.nodes:
+        if n.expanded and not n.is_terminal(ctx.config.max_steps):
+            expanded_by_depth[n.depth] = expanded_by_depth.get(n.depth, 0) + 1
+    assert ctx.n_backtracks == 0
+    assert expanded_by_depth[0] == 1
+    assert all(count <= width for count in expanded_by_depth.values())
+    assert max(expanded_by_depth) >= 2
+
+
 @pytest.mark.parametrize("text,expected", [
     ("Chief of Protocol", "Chief of Protocol"),
     ("\n  yes \nbecause both are American", "yes"),

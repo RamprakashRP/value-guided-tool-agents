@@ -487,6 +487,10 @@ class SearchConfig:
     seed: int = 0
     sampling: str = "diverse"
     force_finish: bool = True
+    beam_width: Optional[int] = None
+    gate: str = "none"
+    gate_value: float = 0.33
+    gate_entropy: float = 0.08
 
 
 @dataclass
@@ -499,6 +503,8 @@ class SearchResult:
     n_backtracks: int
     value_log: List[Dict[str, Any]]
     forced_finish: bool = False
+    n_expansions: int = 0
+    n_branched: int = 0
 
     @property
     def aborted(self) -> bool:
@@ -530,6 +536,8 @@ class SearchContext:
         self.value_log: List[Dict[str, Any]] = []
         self._log_by_id: Dict[int, Dict[str, Any]] = {}
         self.n_backtracks = 0
+        self.n_expansions = 0
+        self.n_branched = 0
         self._call_seed = config.seed * 1_000_003
         self.extra_context: List[str] = []
         self.on_child_scored: Optional[Callable[[Node], None]] = None
@@ -570,15 +578,43 @@ class SearchContext:
         """
         base = self._messages_for_policy(node)
         seed = self._next_seed(k)
+        self.n_expansions += 1
         if k == 1:
             return [self.policy.sample(base, 0.0, seed)]
-        if self.config.sampling == "iid":
+        if self.config.sampling == "iid" and self.config.gate == "none":
+            self.n_branched += 1
             return [self.policy.sample(base, self.config.temperature, seed + i) for i in range(k)]
         out = [self.policy.sample(base, 0.0, seed)]
+        if not self._should_branch(node, out[0]):
+            return out
+        self.n_branched += 1
         for i in range(1, k):
+            if self.config.sampling == "iid":
+                out.append(self.policy.sample(base, self.config.temperature, seed + i))
+                continue
             request = base + [{"role": "user", "content": exclusion_note(out)}]
             out.append(self.policy.sample(request, self.config.temperature, seed + i))
         return out
+
+    def _should_branch(self, node: Node, greedy: Candidate) -> bool:
+        """Uncertainty gate: spend K-1 extra calls only where the search is unsure.
+
+        The root always branches (its V is a placeholder). "value" branches when
+        V(node) < gate_value; "entropy" when the greedy action's mean token entropy
+        exceeds gate_entropy; "either" when any of the two holds.
+        """
+        gate = self.config.gate
+        if gate == "none" or node.parent is None:
+            return True
+        low_value = node.value < self.config.gate_value
+        uncertain = greedy.token_entropy > self.config.gate_entropy
+        if gate == "value":
+            return low_value
+        if gate == "entropy":
+            return uncertain
+        if gate == "either":
+            return low_value or uncertain
+        raise ValueError(f"Unknown gate: {gate}")
 
     def expand(self, node: Node, k: Optional[int] = None) -> List[Node]:
         """Sample k actions at node, execute them, score children with the scorer.
@@ -614,6 +650,7 @@ class SearchContext:
             node.children.append(child)
             children.append(child)
             self._log_node(child, n_samples=len(members))
+            self._log_by_id[child.node_id]["branched"] = len(candidates) > 1
             if self.on_child_scored is not None:
                 self.on_child_scored(child)
         return children
@@ -813,6 +850,8 @@ class SearchContext:
             n_backtracks=self.n_backtracks,
             value_log=self.value_log,
             forced_finish=forced,
+            n_expansions=self.n_expansions,
+            n_branched=self.n_branched,
         )
 
 

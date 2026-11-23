@@ -40,7 +40,8 @@ def default_output(args: argparse.Namespace) -> Path:
         name = f"greedy_{args.policy}_{split_tag}_s{args.seed}"
     else:
         name = (
-            f"{args.method}_{args.scorer}_{args.sampling}_K{args.K}_N{args.N}"
+            f"{args.method}_{args.scorer}_{args.sampling}_K{args.K}_N{args.N}_W{args.beam_width or args.K}"
+            f"_gate-{args.gate}{'' if args.gate == 'none' else f'-v{args.gate_value}-e{args.gate_entropy}'}"
             f"_dp{args.delta_prune}_da{args.delta_abort}_{args.policy}_{split_tag}_s{args.seed}"
         )
     return Path("results") / f"{name}.jsonl"
@@ -88,6 +89,10 @@ def run_one(row: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         seed=args.seed,
         sampling=args.sampling,
         force_finish=not args.no_force_finish,
+        beam_width=args.beam_width,
+        gate=args.gate,
+        gate_value=args.gate_value,
+        gate_entropy=args.gate_entropy,
     )
     scorer = make_scorer("none" if greedy or lats else args.scorer, seed=args.seed, max_steps=args.max_steps)
     ctx = SearchContext(
@@ -124,6 +129,8 @@ def run_one(row: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         "depth": result.trajectory.length,
         "n_nodes": result.n_nodes,
         "n_backtracks": result.n_backtracks,
+        "n_expansions": result.n_expansions,
+        "n_branched": result.n_branched,
         **summary,
         "b_token": args.b_token,
         "within_budget": summary["C_q"] <= args.b_token,
@@ -156,6 +163,15 @@ def main() -> None:
         default="diverse",
         help="diverse: greedy first sample, later samples asked for a different action; iid: K independent samples.",
     )
+    parser.add_argument("--beam-width", type=int, default=None, help="Beam nodes kept per level (default: K).")
+    parser.add_argument(
+        "--gate",
+        choices=["none", "value", "entropy", "either"],
+        default="none",
+        help="Branch to K samples only at uncertain non-root nodes; otherwise take the greedy action alone.",
+    )
+    parser.add_argument("--gate-value", type=float, default=0.33, help="Branch if V(node) is below this.")
+    parser.add_argument("--gate-entropy", type=float, default=0.08, help="Branch if greedy token entropy is above this.")
     parser.add_argument(
         "--no-force-finish",
         action="store_true",

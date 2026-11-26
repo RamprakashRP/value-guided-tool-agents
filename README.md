@@ -176,6 +176,16 @@ DP=0.1 DA=0.15 bash experiments/test_sweep.sh # gated beam/MCTS/PHS x 3 seeds + 
 SEEDS="1 2" RUN_LATS=0 DP=.. DA=.. bash experiments/test_sweep.sh   # e.g. split seeds across machines
 ```
 
+**On a shared GPU server**, run your own Ollama on a private port and split each config over parallel workers (each worker writes its own `*.shardIofN.jsonl`; `summarize.py` merges them):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 OLLAMA_HOST=127.0.0.1:11500 OLLAMA_CONTEXT_LENGTH=4096 OLLAMA_NUM_PARALLEL=4 ollama serve
+export OLLAMA_BASE_URL=http://127.0.0.1:11500/v1   # read by run_search.py as the default --base-url
+SHARDS=4 bash experiments/tune.sh
+SHARDS=4 DP=.. DA=.. bash experiments/test_sweep.sh
+python -m experiments.run_search --shard 0/4 ...   # single worker by hand: questions with index = 0 mod 4
+```
+
 Runs append to JSONL and resume where they stopped. Each row holds `is_correct`, `C_q`, `pruned_tokens`, `n_llm_calls`, `stop_reason`, the chosen trajectory and a per-node `value_log` (every expanded prefix with its V), which can be used for step-wise analysis or to refit V_theta on search-time prefixes.
 
 ---

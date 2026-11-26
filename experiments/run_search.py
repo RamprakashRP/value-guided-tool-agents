@@ -44,6 +44,8 @@ def default_output(args: argparse.Namespace) -> Path:
             f"_gate-{args.gate}{'' if args.gate == 'none' else f'-v{args.gate_value}-e{args.gate_entropy}'}"
             f"_dp{args.delta_prune}_da{args.delta_abort}_{args.policy}_{split_tag}_s{args.seed}"
         )
+    if args.shard:
+        name += "_shard" + args.shard.replace("/", "of")
     return Path("results") / f"{name}.jsonl"
 
 
@@ -181,7 +183,12 @@ def main() -> None:
     parser.add_argument("--b-token", type=int, default=B_TOKEN)
     parser.add_argument("--policy", choices=["ollama", "mock"], default="ollama")
     parser.add_argument("--model", default="qwen2.5:7b")
-    parser.add_argument("--base-url", default="http://localhost:11434/v1")
+    parser.add_argument("--base-url", default=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"))
+    parser.add_argument(
+        "--shard",
+        default=None,
+        help="i/n: run only questions whose index in the split is i mod n (for parallel workers).",
+    )
     parser.add_argument("--api-key", default=os.getenv("OLLAMA_API_KEY", "ollama"))
     parser.add_argument("--output", default=None)
     parser.add_argument("--no-value-log", action="store_true", help="Skip per-node logs (smaller files).")
@@ -200,6 +207,11 @@ def main() -> None:
     dataset = datasets.load_dataset("hotpotqa/hotpot_qa", "distractor", split=args.split)
     if args.limit:
         dataset = dataset.select(range(min(args.limit, len(dataset))))
+    if args.shard:
+        shard_i, shard_n = (int(x) for x in args.shard.split("/"))
+        if not 0 <= shard_i < shard_n:
+            parser.error("--shard must be i/n with 0 <= i < n")
+        dataset = dataset.select(range(shard_i, len(dataset), shard_n))
 
     n = correct = tokens = 0
     pbar = tqdm(dataset, desc=f"{args.method}")

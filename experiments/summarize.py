@@ -47,6 +47,7 @@ def group_key(rec: Dict[str, Any]) -> Tuple:
 
 def load_search_rows(patterns: List[str]) -> Dict[Tuple, List[Dict[str, Any]]]:
     groups: Dict[Tuple, List[Dict[str, Any]]] = defaultdict(list)
+    seen = set()
     for pattern in patterns:
         for path in sorted(glob.glob(pattern)):
             with open(path, encoding="utf-8") as f:
@@ -54,7 +55,11 @@ def load_search_rows(patterns: List[str]) -> Dict[Tuple, List[Dict[str, Any]]]:
                     if line.strip():
                         rec = json.loads(line)
                         rec["_seed"] = rec["config"]["seed"]
-                        groups[group_key(rec)].append(rec)
+                        key = group_key(rec)
+                        if (key, rec["_seed"], rec["task_id"]) in seen:
+                            continue
+                        seen.add((key, rec["_seed"], rec["task_id"]))
+                        groups[key].append(rec)
     return groups
 
 

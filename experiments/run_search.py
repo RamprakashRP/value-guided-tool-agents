@@ -11,11 +11,12 @@ import argparse
 import json
 import logging
 import os
+import sys
 import time
 import zlib
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, Set
+from typing import Any, Dict, List, Set
 
 from tqdm import tqdm
 
@@ -133,6 +134,7 @@ def run_one(row: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         "n_backtracks": result.n_backtracks,
         "n_expansions": result.n_expansions,
         "n_branched": result.n_branched,
+        "n_failed_llm_calls": getattr(policy, "n_failed_calls", 0),
         **summary,
         "b_token": args.b_token,
         "within_budget": summary["C_q"] <= args.b_token,
@@ -214,11 +216,18 @@ def main() -> None:
         dataset = dataset.select(range(shard_i, len(dataset), shard_n))
 
     n = correct = tokens = 0
+    skipped: List[str] = []
     pbar = tqdm(dataset, desc=f"{args.method}")
     for row in pbar:
         if str(row["id"]) in done:
             continue
-        rec = run_one(row, args)
+        try:
+            rec = run_one(row, args)
+        except Exception as e:
+            # Not written, so a rerun of the same command retries it.
+            print(f"Skipping {row['id']}: {type(e).__name__}: {e}", file=sys.stderr)
+            skipped.append(str(row["id"]))
+            continue
         with open(output, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
         n += 1
@@ -227,6 +236,8 @@ def main() -> None:
         pbar.set_postfix({"EM": f"{100 * correct / n:.1f}%", "C(q)": f"{tokens / n:.0f}"})
 
     print(f"Wrote {n} new results to {output}")
+    if skipped:
+        print(f"WARNING: {len(skipped)} queries failed and were skipped; rerun to retry: {skipped}", file=sys.stderr)
 
 
 if __name__ == "__main__":

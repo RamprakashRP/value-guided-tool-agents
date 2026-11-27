@@ -245,12 +245,41 @@ class OllamaPolicy:
             logging.getLogger(name).setLevel(logging.WARNING)
         self.max_completion_tokens = max_completion_tokens
         self.question = question
+        self.max_retries = 2
+        self.n_failed_calls = 0
+        self._failed_prompt_tokens = 0
+        self._failed_completion_tokens = 0
 
-    def _create(self, **kwargs: Any) -> Any:
-        try:
-            return self.client.chat.completions.create(logprobs=True, top_logprobs=2, **kwargs)
-        except Exception:
-            return self.client.chat.completions.create(**kwargs)
+    def _create(self, logprobs: bool = True, **kwargs: Any) -> Any:
+        """Ollama returns HTTP 500 when generation degenerates ("token repeat limit reached").
+        Retry with a new seed at temperature >= 0.7 (greedy would repeat the same loop).
+        Failed attempts are still charged to C(q), at max_tokens completion tokens each."""
+        from openai import InternalServerError
+
+        for attempt in range(self.max_retries + 1):
+            if attempt:
+                kwargs = {**kwargs, "seed": kwargs["seed"] + 7919 * attempt,
+                          "temperature": max(kwargs["temperature"], 0.7)}
+            try:
+                if not logprobs:
+                    return self.client.chat.completions.create(**kwargs)
+                try:
+                    return self.client.chat.completions.create(logprobs=True, top_logprobs=2, **kwargs)
+                except InternalServerError:
+                    raise
+                except Exception:
+                    return self.client.chat.completions.create(**kwargs)
+            except InternalServerError:
+                self.n_failed_calls += 1
+                self._failed_prompt_tokens += sum(len(json.dumps(m, default=str)) for m in kwargs["messages"]) // 4
+                self._failed_completion_tokens += kwargs["max_tokens"]
+                if attempt == self.max_retries:
+                    raise
+
+    def _take_failed_tokens(self) -> Tuple[int, int]:
+        out = (self._failed_prompt_tokens, self._failed_completion_tokens)
+        self._failed_prompt_tokens = self._failed_completion_tokens = 0
+        return out
 
     def sample(self, messages: List[Dict[str, Any]], temperature: float, seed: int) -> Candidate:
         response = self._create(
@@ -264,8 +293,9 @@ class OllamaPolicy:
         choice = response.choices[0]
         message = choice.message
         usage = getattr(response, "usage", None)
-        p_tok = usage.prompt_tokens if usage else 0
-        c_tok = usage.completion_tokens if usage else 0
+        failed_p, failed_c = self._take_failed_tokens()
+        p_tok = (usage.prompt_tokens if usage else 0) + failed_p
+        c_tok = (usage.completion_tokens if usage else 0) + failed_c
         action_logprob, logit_margin, token_entropy = extract_logprob_metrics(choice)
         tool_calls = getattr(message, "tool_calls", None)
 
@@ -304,7 +334,8 @@ class OllamaPolicy:
         )
 
     def generate_text(self, messages: List[Dict[str, Any]], max_tokens: int, seed: int) -> Tuple[str, int, int]:
-        response = self.client.chat.completions.create(
+        response = self._create(
+            logprobs=False,
             model=self.model,
             messages=messages,
             temperature=0.0,
@@ -312,10 +343,11 @@ class OllamaPolicy:
             seed=seed,
         )
         usage = getattr(response, "usage", None)
+        failed_p, failed_c = self._take_failed_tokens()
         return (
             response.choices[0].message.content or "",
-            usage.prompt_tokens if usage else 0,
-            usage.completion_tokens if usage else 0,
+            (usage.prompt_tokens if usage else 0) + failed_p,
+            (usage.completion_tokens if usage else 0) + failed_c,
         )
 
 
